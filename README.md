@@ -1,5 +1,7 @@
 # claude-limit-cli
 
+## THIS APP WAS MOSTLY VIBE CODED, YOU HAVE BEEN WARNED!
+
 A small CLI tool that shows your Claude Pro usage limits (5-hour and 7-day windows) and the time remaining until each resets.
 
 There is no official Anthropic API for subscription quota data. This tool calls the same internal endpoint the Claude web UI uses, authenticated with your browser session key.
