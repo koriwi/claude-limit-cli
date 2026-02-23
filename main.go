@@ -18,8 +18,8 @@ const (
 	userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-// ANSI codes
-const (
+// ANSI codes (vars so --no-color can zero them at startup)
+var (
 	ansiReset  = "\033[0m"
 	ansiBold   = "\033[1m"
 	ansiDim    = "\033[2m"
@@ -28,6 +28,11 @@ const (
 	ansiRed    = "\033[31m"
 	ansiCyan   = "\033[36m"
 )
+
+func disableColor() {
+	ansiReset, ansiBold, ansiDim = "", "", ""
+	ansiGreen, ansiYellow, ansiRed, ansiCyan = "", "", "", ""
+}
 
 // Nerd font icons (Material Design via nerd-fonts)
 const (
@@ -318,12 +323,17 @@ func fatalf(format string, args ...any) {
 
 func main() {
 	var flagKey, flagOrg string
-	var flagCompact, flagRefresh bool
+	var flagCompact, flagRefresh, flagNoColor bool
 	flag.StringVar(&flagKey, "session-key", "", "Claude session key (sk-ant-…)")
 	flag.StringVar(&flagOrg, "org-id", "", "Organization UUID (auto-fetched if not set)")
 	flag.BoolVar(&flagCompact, "compact", false, "One-line output")
 	flag.BoolVar(&flagRefresh, "refresh", false, "Fetch fresh data, ignoring the cache")
+	flag.BoolVar(&flagNoColor, "no-color", false, "Disable ANSI color codes")
 	flag.Parse()
+
+	if flagNoColor {
+		disableColor()
+	}
 
 	// Ensure config dir exists (also used by configDir inside loadConfig/cache)
 	if _, err := configDir(); err != nil {
