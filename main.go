@@ -230,10 +230,23 @@ func fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
+func printCompact(usage *UsageResponse) {
+	h := usage.FiveHour
+	d := usage.SevenDay
+	hCol := utilColor(h.Utilization)
+	dCol := utilColor(d.Utilization)
+	fmt.Printf("%s%s%s %.1f%% %s   %s%s%s %.1f%% %s\n",
+		hCol, iconTimer, ansiReset, h.Utilization, formatTimeLeft(h.ResetsAt),
+		dCol, iconCalendar, ansiReset, d.Utilization, formatTimeLeft(d.ResetsAt),
+	)
+}
+
 func main() {
 	var flagKey, flagOrg string
+	var flagCompact bool
 	flag.StringVar(&flagKey, "session-key", "", "Claude session key (sk-ant-…)")
 	flag.StringVar(&flagOrg, "org-id", "", "Organization UUID (auto-fetched if not set)")
+	flag.BoolVar(&flagCompact, "compact", false, "One-line output")
 	flag.Parse()
 
 	cfgKey, cfgOrg := loadConfig()
@@ -268,6 +281,11 @@ func main() {
 	usage, err := fetchUsage(sessionKey, orgID)
 	if err != nil {
 		fatalf("%v", err)
+	}
+
+	if flagCompact {
+		printCompact(usage)
+		return
 	}
 
 	title := "Claude Pro Usage"
