@@ -52,6 +52,89 @@ type Organization struct {
 	Name string `json:"name"`
 }
 
+type Cache struct {
+	FetchedAt string        `json:"fetched_at"`
+	OrgName   string        `json:"org_name"`
+	Usage     UsageResponse `json:"usage"`
+}
+
+// configDir returns ~/.config/claude-usage, creating it if needed.
+func configDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "claude-usage")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func cachePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cache.json"), nil
+}
+
+func parseResetTime(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unparseable time: %s", s)
+}
+
+// isCacheValid returns true if all non-nil reset times are still in the future.
+func isCacheValid(c *Cache) bool {
+	for _, u := range []LimitUsage{c.Usage.FiveHour, c.Usage.SevenDay} {
+		if u.ResetsAt == nil {
+			continue
+		}
+		t, err := parseResetTime(*u.ResetsAt)
+		if err != nil || time.Now().After(t) {
+			return false
+		}
+	}
+	return true
+}
+
+func loadCache() *Cache {
+	path, err := cachePath()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var c Cache
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil
+	}
+	return &c
+}
+
+func saveCache(orgName string, usage *UsageResponse) {
+	path, err := cachePath()
+	if err != nil {
+		return
+	}
+	c := Cache{
+		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+		OrgName:   orgName,
+		Usage:     *usage,
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o600)
+}
+
 func fetch(url, sessionKey string) ([]byte, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
@@ -142,28 +225,17 @@ func formatTimeLeft(resetsAt *string) string {
 	if resetsAt == nil {
 		return "—"
 	}
-	var t time.Time
-	var err error
-	// Try fractional seconds first (API returns e.g. "2025-12-01T15:00:00.000Z")
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		t, err = time.Parse(layout, *resetsAt)
-		if err == nil {
-			break
-		}
-	}
+	t, err := parseResetTime(*resetsAt)
 	if err != nil {
 		return "unknown"
 	}
-
 	dur := time.Until(t)
 	if dur <= 0 {
 		return "resetting…"
 	}
-
 	days := int(dur.Hours()) / 24
 	hours := int(dur.Hours()) % 24
 	mins := int(dur.Minutes()) % 60
-
 	if days > 0 {
 		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
 	} else if hours > 0 {
@@ -176,7 +248,6 @@ func printRow(icon, label string, u LimitUsage) {
 	col := utilColor(u.Utilization)
 	bar := progressBar(u.Utilization, 20)
 	tl := formatTimeLeft(u.ResetsAt)
-
 	fmt.Printf("  %s  %-10s %s%s%s  %s%5.1f%%%s   %s%s %s%s\n",
 		icon, label,
 		col, bar, ansiReset,
@@ -185,12 +256,23 @@ func printRow(icon, label string, u LimitUsage) {
 	)
 }
 
+func printCompact(usage *UsageResponse) {
+	h := usage.FiveHour
+	d := usage.SevenDay
+	hCol := utilColor(h.Utilization)
+	dCol := utilColor(d.Utilization)
+	fmt.Printf("%s%s%s %.1f%% %s   %s%s%s %.1f%% %s\n",
+		hCol, iconTimer, ansiReset, h.Utilization, formatTimeLeft(h.ResetsAt),
+		dCol, iconCalendar, ansiReset, d.Utilization, formatTimeLeft(d.ResetsAt),
+	)
+}
+
 func loadConfig() (sessionKey, orgID string) {
-	dir, err := os.UserConfigDir()
+	dir, err := configDir()
 	if err != nil {
 		return
 	}
-	f, err := os.Open(filepath.Join(dir, "claude-usage", "config"))
+	f, err := os.Open(filepath.Join(dir, "config"))
 	if err != nil {
 		return
 	}
@@ -230,33 +312,27 @@ func fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-func printCompact(usage *UsageResponse) {
-	h := usage.FiveHour
-	d := usage.SevenDay
-	hCol := utilColor(h.Utilization)
-	dCol := utilColor(d.Utilization)
-	fmt.Printf("%s%s%s %.1f%% %s   %s%s%s %.1f%% %s\n",
-		hCol, iconTimer, ansiReset, h.Utilization, formatTimeLeft(h.ResetsAt),
-		dCol, iconCalendar, ansiReset, d.Utilization, formatTimeLeft(d.ResetsAt),
-	)
-}
-
 func main() {
 	var flagKey, flagOrg string
-	var flagCompact bool
+	var flagCompact, flagRefresh bool
 	flag.StringVar(&flagKey, "session-key", "", "Claude session key (sk-ant-…)")
 	flag.StringVar(&flagOrg, "org-id", "", "Organization UUID (auto-fetched if not set)")
 	flag.BoolVar(&flagCompact, "compact", false, "One-line output")
+	flag.BoolVar(&flagRefresh, "refresh", false, "Fetch fresh data, ignoring the cache")
 	flag.Parse()
 
-	cfgKey, cfgOrg := loadConfig()
+	// Ensure config dir exists (also used by configDir inside loadConfig/cache)
+	if _, err := configDir(); err != nil {
+		fatalf("cannot create config directory: %v", err)
+	}
 
+	cfgKey, cfgOrg := loadConfig()
 	sessionKey := firstNonEmpty(flagKey, os.Getenv("CLAUDE_SESSION_KEY"), cfgKey)
 	orgID := firstNonEmpty(flagOrg, os.Getenv("CLAUDE_ORG_ID"), cfgOrg)
 
 	if sessionKey == "" {
-		dir, _ := os.UserConfigDir()
-		cfgPath := filepath.Join(dir, "claude-usage", "config")
+		dir, _ := configDir()
+		cfgPath := filepath.Join(dir, "config")
 		fmt.Fprintf(os.Stderr, ansiBold+ansiRed+"Error:"+ansiReset+" session key required\n\n")
 		fmt.Fprintf(os.Stderr, "Provide it via:\n")
 		fmt.Fprintf(os.Stderr, "  --session-key <key>       CLI flag\n")
@@ -269,18 +345,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	var usage *UsageResponse
 	orgName := ""
-	if orgID == "" {
-		var err error
-		orgID, orgName, err = fetchOrg(sessionKey)
-		if err != nil {
-			fatalf("%v", err)
+
+	// Use cache unless --refresh or cache is stale (reset window has passed)
+	if !flagRefresh {
+		if c := loadCache(); c != nil && isCacheValid(c) {
+			usage = &c.Usage
+			orgName = c.OrgName
 		}
 	}
 
-	usage, err := fetchUsage(sessionKey, orgID)
-	if err != nil {
-		fatalf("%v", err)
+	if usage == nil {
+		if orgID == "" {
+			var err error
+			orgID, orgName, err = fetchOrg(sessionKey)
+			if err != nil {
+				fatalf("%v", err)
+			}
+		}
+		var err error
+		usage, err = fetchUsage(sessionKey, orgID)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		saveCache(orgName, usage)
 	}
 
 	if flagCompact {
