@@ -88,8 +88,12 @@ func parseResetTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unparseable time: %s", s)
 }
 
-// isCacheValid returns true if all non-nil reset times are still in the future.
+// isCacheValid returns true if the cache is younger than 30 minutes and no
+// reset window has already passed.
 func isCacheValid(c *Cache) bool {
+	if fetched, err := time.Parse(time.RFC3339, c.FetchedAt); err != nil || time.Since(fetched) > 30*time.Minute {
+		return false
+	}
 	for _, u := range []LimitUsage{c.Usage.FiveHour, c.Usage.SevenDay} {
 		if u.ResetsAt == nil {
 			continue
